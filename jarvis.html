@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#08121c">
+<title>Джарвис</title>
+<style>
+:root{--bg:#08121c;--panel:#0f1d2b;--ink:#dbe9f5;--dim:#7a8fa3;--accent:#4fc3f7;--warn:#ffb74d;--ok:#81d4a0}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;flex-direction:column;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+header{display:flex;justify-content:space-between;align-items:center;padding:14px 18px}
+header h1{font-size:18px;font-weight:600;margin:0;letter-spacing:.04em}
+button{font:inherit;color:inherit;background:none;border:1px solid #23384c;border-radius:10px;padding:8px 12px;cursor:pointer}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+#settings{display:none;margin:0 18px 8px;padding:14px;background:var(--panel);border-radius:14px;gap:10px;flex-direction:column}
+#settings.open{display:flex}
+#settings label{display:flex;flex-direction:column;gap:4px;font-size:14px;color:var(--dim)}
+#settings label.row{flex-direction:row;align-items:center;gap:10px}
+textarea{font:inherit;resize:vertical}
+textarea,input[type=password],input[type=text],select{background:#08121c;color:var(--ink);border:1px solid #23384c;border-radius:8px;padding:9px;font:inherit;width:100%}
+main{flex:1;display:flex;flex-direction:column;align-items:center;min-height:0}
+.stage{padding:18px 0 6px;display:flex;flex-direction:column;align-items:center;gap:12px}
+#orb{width:132px;height:132px;border-radius:50%;border:2px solid var(--accent);background:radial-gradient(circle at 50% 45%,#12354d,#08121c 70%);box-shadow:0 0 0 0 rgba(79,195,247,.0);padding:0;transition:border-color .2s,box-shadow .2s}
+#orb[data-s=listening]{animation:pulse 1.8s ease-in-out infinite}
+#orb[data-s=thinking]{border-color:var(--warn);animation:spin 1s linear infinite;border-style:dashed}
+#orb[data-s=speaking]{border-color:var(--ok);animation:pulse 0.7s ease-in-out infinite}
+#orb[data-s=idle]{border-color:#2b4257}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(79,195,247,.45)}50%{box-shadow:0 0 0 22px rgba(79,195,247,0)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){#orb{animation:none!important}}
+#status{color:var(--dim);font-size:14px;text-align:center;min-height:22px;padding:0 18px}
+#log{flex:1;width:100%;max-width:640px;overflow-y:auto;padding:8px 18px;display:flex;flex-direction:column;gap:10px;min-height:0}
+.m{max-width:88%;padding:9px 13px;border-radius:14px;background:var(--panel);white-space:pre-wrap}
+.m.u{align-self:flex-end;background:#16384f}
+.m.e{color:var(--warn)}
+form{display:flex;gap:8px;width:100%;max-width:640px;padding:10px 18px 14px}
+form button{border-color:var(--accent);color:var(--accent)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Джарвис</h1>
+  <button id="gear" aria-expanded="false">Настройки</button>
+</header>
+
+<section id="settings">
+  <label>API-ключ Anthropic
+    <input id="key" type="password" placeholder="sk-ant-…" autocomplete="off">
+  </label>
+  <label>Модель
+    <select id="model">
+      <option value="claude-haiku-5-5">Haiku 5.5 — быстро</option>
+      <option value="claude-sonnet-5-5">Sonnet 5.5 — умнее</option>
+    </select>
+  </label>
+  <label class="row"><input id="wake" type="checkbox" checked> Реагировать только на слово «Джарвис»</label>
+  <label class="row"><input id="voiceOn" type="checkbox" checked> Отвечать голосом</label>
+  <label>Токен ПК-агента (из token.txt)
+    <input id="token" type="password" autocomplete="off">
+  </label>
+  <label>Действия телефона, по одному в строке: название=ссылка
+    <textarea id="phone" rows="4" placeholder="фонарик=https://trigger.macrodroid.com/…"></textarea>
+  </label>
+  <button id="save">Сохранить</button>
+</section>
+
+<main>
+  <div class="stage">
+    <button id="orb" data-s="idle" aria-label="Включить или выключить микрофон"></button>
+    <div id="status">Нажми на шар, чтобы включить микрофон</div>
+  </div>
+  <div id="log" aria-live="polite"></div>
+  <form id="f">
+    <input id="t" type="text" placeholder="Или напиши сообщение" autocomplete="off">
+    <button>Отправить</button>
+  </form>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const S = { key:'', model:'claude-haiku-5-5', wake:true, voice:true, token:'', phone:'' };
+try { Object.assign(S, JSON.parse(localStorage.getItem('jarvis') || '{}')); } catch(e) {}
+
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, recActive = false, listening = false, speaking = false, busy = false, awaiting = false;
+let history = [];
+
+/* ---------- UI ---------- */
+function paintSettings(){ $('token').value = S.token; $('phone').value = S.phone; $('key').value = S.key; $('model').value = S.model; $('wake').checked = S.wake; $('voiceOn').checked = S.voice; }
+paintSettings();
+if (!S.key) { $('settings').classList.add('open'); $('gear').setAttribute('aria-expanded','true'); }
+$('gear').onclick = () => { const o = $('settings').classList.toggle('open'); $('gear').setAttribute('aria-expanded', o); };
+$('save').onclick = () => {
+  S.token = $('token').value.trim(); S.phone = $('phone').value.trim(); S.key = $('key').value.trim(); S.model = $('model').value; S.wake = $('wake').checked; S.voice = $('voiceOn').checked;
+  try { localStorage.setItem('jarvis', JSON.stringify(S)); } catch(e) {}
+  $('settings').classList.remove('open'); $('gear').setAttribute('aria-expanded','false');
+  setStatus('Сохранено'); checkAgent();
+};
+function setStatus(t){ $('status').textContent = t; }
+function setOrb(s){ $('orb').dataset.s = s; }
+function addMsg(text, cls){ const d = document.createElement('div'); d.className = 'm ' + (cls||''); d.textContent = text; $('log').appendChild(d); $('log').scrollTop = 1e9; }
+function idleLabel(){ return listening ? (S.wake ? 'Слушаю. Скажи «Джарвис» и команду' : 'Слушаю. Говори') : 'Микрофон выключен'; }
+function refresh(){ setOrb(busy ? 'thinking' : speaking ? 'speaking' : listening ? 'listening' : 'idle'); if (!busy && !speaking) setStatus(idleLabel()); }
+
+/* ---------- Распознавание речи ---------- */
+function startRec(){
+  if (!SR || recActive || !listening || speaking || busy) return;
+  rec = new SR();
+  rec.lang = 'ru-RU'; rec.continuous = true; rec.interimResults = false;
+  rec.onstart = () => { recActive = true; };
+  rec.onend = () => { recActive = false; setTimeout(startRec, 250); };
+  rec.onerror = e => {
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+      listening = false; refresh(); setStatus('Нет доступа к микрофону. Разреши его в настройках браузера.');
+    }
+  };
+  rec.onresult = e => {
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) handleSpeech(e.results[i][0].transcript.trim());
+    }
+  };
+  try { rec.start(); } catch(e) {}
+}
+function stopRec(){ if (rec) { try { rec.abort(); } catch(e) {} } recActive = false; }
+
+const WAKE = /(джарвис|джарвиз|жарвис|джарвес|jarvis)/i;
+function handleSpeech(t){
+  if (!t) return;
+  if (/^(стоп|хватит|замолчи)[.!]?$/i.test(t.replace(WAKE,'').trim())) { cancelSpeech(); return; }
+  if (awaiting || !S.wake) { awaiting = false; ask(t); return; }
+  const m = t.match(WAKE);
+  if (!m) return;
+  const cmd = t.slice(m.index + m[0].length).replace(/^[\s,.!?:-]+/, '');
+  if (cmd.length > 1) ask(cmd);
+  else { awaiting = true; say('Слушаю.'); }
+}
+
+$('orb').onclick = () => {
+  if (!SR) { setStatus('Этот браузер не умеет распознавать речь. Пиши текстом или открой в Chrome.'); return; }
+  if (listening) { listening = false; awaiting = false; stopRec(); cancelSpeech(); refresh(); return; }
+  listening = true; awaiting = true; refresh(); startRec();
+  unlockSpeech();
+};
+
+/* ---------- Озвучка ---------- */
+let ruVoice = null;
+function pickVoice(){ const v = speechSynthesis.getVoices(); ruVoice = v.find(x => /^ru/i.test(x.lang)) || null; }
+if ('speechSynthesis' in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+function unlockSpeech(){ try { const u = new SpeechSynthesisUtterance(' '); speechSynthesis.speak(u); } catch(e) {} }
+function cancelSpeech(){ try { speechSynthesis.cancel(); } catch(e) {} speaking = false; refresh(); startRec(); }
+function say(text){
+  if (!S.voice || !('speechSynthesis' in window)) { addMsg(text); return Promise.resolve(); }
+  addMsg(text);
+  return new Promise(res => {
+    stopRec(); speaking = true; refresh(); setStatus('Говорю…');
+    const parts = text.match(/[^.!?]+[.!?]*/g) || [text];
+    let i = 0;
+    const next = () => {
+      if (!speaking || i >= parts.length) { speaking = false; refresh(); startRec(); res(); return; }
+      const u = new SpeechSynthesisUtterance(parts[i++].trim());
+      u.lang = 'ru-RU'; if (ruVoice) u.voice = ruVoice;
+      u.onend = next; u.onerror = next;
+      speechSynthesis.speak(u);
+    };
+    next();
+  });
+}
+
+/* ---------- Claude + инструменты ---------- */
+const AGENT = 'http://127.0.0.1:8765';
+let pcApps = null; // null = агент недоступен
+
+function phoneMap(){
+  const m = {};
+  (S.phone || '').split('\n').forEach(l => {
+    const i = l.indexOf('='); if (i < 1) return;
+    const k = l.slice(0, i).trim().toLowerCase(), v = l.slice(i + 1).trim();
+    if (k && /^https?:\/\//.test(v)) m[k] = v;
+  });
+  return m;
+}
+async function checkAgent(){
+  pcApps = null;
+  if (!S.token) return;
+  try {
+    const r = await fetch(AGENT + '/info', { headers:{ 'X-Token':S.token } });
+    if (r.ok) pcApps = (await r.json()).apps;
+  } catch(e) {}
+}
+checkAgent();
+
+function buildTools(){
+  const tools = [];
+  if (pcApps) tools.push({
+    name:'pc',
+    description:'Управление компьютером пользователя (Windows). open_app: arg = название программы из списка: ' + pcApps.join(', ') + '. open_url: arg = ссылка. search_web: arg = запрос. volume_up/volume_down: arg = на сколько процентов (необязательно). Перед shutdown ВСЕГДА сначала переспроси пользователя и выполняй только после явного «да».',
+    input_schema:{ type:'object', properties:{
+      action:{ type:'string', enum:['open_app','open_url','search_web','volume_up','volume_down','mute','play_pause','next_track','prev_track','lock','shutdown','cancel_shutdown'] },
+      arg:{ type:'string' } }, required:['action'] }
+  });
+  const pm = Object.keys(phoneMap());
+  if (pm.length) tools.push({
+    name:'phone',
+    description:'Выполнить действие на телефоне пользователя (Android).',
+    input_schema:{ type:'object', properties:{ name:{ type:'string', enum:pm } }, required:['name'] }
+  });
+  return tools;
+}
+
+async function runTool(b){
+  try {
+    if (b.name === 'pc') {
+      const r = await fetch(AGENT + '/do', { method:'POST',
+        headers:{ 'Content-Type':'application/json', 'X-Token':S.token },
+        body:JSON.stringify(b.input) });
+      return (await r.json()).result || 'Готово';
+    }
+    if (b.name === 'phone') {
+      const url = phoneMap()[String(b.input.name).toLowerCase()];
+      if (!url) return 'Нет такого действия';
+      await fetch(url, { mode:'no-cors' });
+      return 'Команда отправлена на телефон';
+    }
+  } catch(e) { return 'Не удалось выполнить: ' + e.message; }
+  return 'Неизвестный инструмент';
+}
+
+function trimHistory(){
+  history = history.slice(-24);
+  while (history.length && !(history[0].role === 'user' && typeof history[0].content === 'string')) history.shift();
+}
+
+async function callClaude(){
+  const now = new Date().toLocaleString('ru-RU', { dateStyle:'full', timeStyle:'short' });
+  const body = {
+    model:S.model, max_tokens:500,
+    system:'Ты Джарвис — личный голосовой помощник. Отвечай по-русски, коротко (1–3 предложения), без markdown, списков и эмодзи: ответ будет зачитан вслух. Если просят что-то сделать на компьютере или телефоне, используй инструменты, а потом коротко скажи, что сделано. Сейчас: ' + now + '.',
+    messages:history
+  };
+  const tools = buildTools();
+  if (tools.length) body.tools = tools;
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method:'POST',
+    headers:{ 'content-type':'application/json', 'x-api-key':S.key,
+      'anthropic-version':'2023-06-01', 'anthropic-dangerous-direct-browser-access':'true' },
+    body:JSON.stringify(body)
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error && data.error.message || ('Ошибка ' + r.status));
+  return data;
+}
+
+async function ask(text){
+  if (busy) return;
+  addMsg(text, 'u');
+  if (!S.key) { addMsg('Сначала введи API-ключ в настройках.', 'e'); return; }
+  busy = true; stopRec(); refresh(); setStatus('Думаю…');
+  const mark = history.length;
+  history.push({ role:'user', content:text });
+  trimHistory();
+  let reply = '';
+  try {
+    let data = await callClaude();
+    for (let i = 0; i < 5 && data.stop_reason === 'tool_use'; i++) {
+      history.push({ role:'assistant', content:data.content });
+      setStatus('Выполняю…');
+      const results = [];
+      for (const b of data.content.filter(x => x.type === 'tool_use'))
+        results.push({ type:'tool_result', tool_use_id:b.id, content:await runTool(b) });
+      history.push({ role:'user', content:results });
+      data = await callClaude();
+    }
+    reply = data.content.filter(b => b.type === 'text').map(b => b.text).join(' ').trim() || 'Готово.';
+    history.push({ role:'assistant', content:reply });
+    busy = false;
+    await say(reply);
+  } catch(err) {
+    history.length = Math.min(history.length, mark); busy = false;
+    addMsg('Не получилось: ' + err.message, 'e');
+  }
+  busy = false; refresh(); startRec();
+}
+
+$('f').onsubmit = e => { e.preventDefault(); const v = $('t').value.trim(); if (v) { $('t').value = ''; unlockSpeech(); ask(v); } };
+
+if (!SR) setStatus('Распознавание речи не поддерживается этим браузером. Работает ввод текстом.');
+</script>
+</body>
+</html>
